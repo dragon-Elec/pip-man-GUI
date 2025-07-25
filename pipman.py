@@ -42,12 +42,18 @@ class PipService:
             return -1, f"An unexpected error occurred: {e}"
 
     def get_packages(self):
-        all_cmd = ['pip', 'list', '--user', '--format=json']
-        outdated_cmd = ['pip', 'list', '--user', '--outdated', '--format=json']
-        
-        proc_all = subprocess.run(all_cmd, capture_output=True, text=True, check=True, encoding='utf-8')
+        # Always succeed at listing locally-installed packages
+        proc_all = subprocess.run(
+            ['pip', 'list', '--user', '--format=json'],
+            capture_output=True, text=True, check=False, encoding='utf-8'
+        )
         packages = json.loads(proc_all.stdout or '[]')
+        if proc_all.returncode != 0:
+            # pip list failed; return empty list so UI still comes up
+            packages = []
 
+        # Outdated list is optional; swallow network errors
+        outdated_cmd = ['pip', 'list', '--user', '--outdated', '--format=json']
         proc_outdated = subprocess.run(outdated_cmd, capture_output=True, text=True, check=False, encoding='utf-8')
         outdated_info = {p['name']: p['latest_version'] for p in json.loads(proc_outdated.stdout or '[]')} if proc_outdated.returncode == 0 and proc_outdated.stdout else {}
         
@@ -208,7 +214,7 @@ class PipManagerWindow(Gtk.ApplicationWindow):
             try:
                 packages, outdated_info = self.pip_service.get_packages()
                 GLib.idle_add(self.update_package_list_store, packages, outdated_info)
-            except Exception as e:
+            except Exception as e:          # keep broad catch for other errors
                 GLib.idle_add(self.log_output, f"Error loading packages. Are you connected to the internet?\nDetails: {e}")
             finally:
                 GLib.idle_add(self.set_ui_busy, False)
