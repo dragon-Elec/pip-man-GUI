@@ -9,6 +9,7 @@ import subprocess
 import json
 import threading
 from pathlib import Path
+import socket
 
 # --- Data Caching ---
 CACHE_DIR = Path(GLib.get_user_cache_dir()) / 'pipman'
@@ -41,23 +42,46 @@ class PipService:
         except Exception as e:
             return -1, f"An unexpected error occurred: {e}"
 
+    def _has_internet_connection(self):
+        """Checks for a live internet connection by connecting to a reliable host."""
+        try:
+            # Connect to a well-known, highly available DNS server.
+            # A 2-second timeout is more than enough for a quick check.
+            socket.create_connection(("8.8.8.8", 53), timeout=2)
+            return True
+        except (OSError, socket.timeout):
+            return False
+
     def get_packages(self):
-        # Always succeed at listing locally-installed packages
+        # Step 1: Always get locally-installed packages (works offline).
         proc_all = subprocess.run(
             ['pip', 'list', '--user', '--format=json'],
             capture_output=True, text=True, check=False, encoding='utf-8'
         )
-        packages = json.loads(proc_all.stdout or '[]')
-        if proc_all.returncode != 0:
-            # pip list failed; return empty list so UI still comes up
-            packages = []
+        packages = json.loads(proc_all.stdout or '[]') if proc_all.returncode == 0 and proc_all.stdout else []
 
-        # Outdated list is optional; swallow network errors
-        outdated_cmd = ['pip', 'list', '--user', '--outdated', '--format=json']
-        proc_outdated = subprocess.run(outdated_cmd, capture_output=True, text=True, check=False, encoding='utf-8')
-        outdated_info = {p['name']: p['latest_version'] for p in json.loads(proc_outdated.stdout or '[]')} if proc_outdated.returncode == 0 and proc_outdated.stdout else {}
+        # Step 2: Check for outdated packages, but only if online.
+        outdated_info = {}
+        status_message = None  # No message needed if everything works.
         
-        return packages, outdated_info
+        if not self._has_internet_connection():
+            status_message = "No internet connection detected. Skipping check for outdated packages."
+        else:
+            try:
+                outdated_cmd = ['pip', 'list', '--user', '--outdated', '--format=json']
+                # Keep a short timeout as a fallback in case PyPI is down.
+                proc_outdated = subprocess.run(
+                    outdated_cmd, capture_output=True, text=True,
+                    check=False, encoding='utf-8', timeout=15
+                )
+                if proc_outdated.returncode == 0 and proc_outdated.stdout:
+                    outdated_info = {p['name']: p['latest_version'] for p in json.loads(proc_outdated.stdout or '[]')}
+            except subprocess.TimeoutExpired:
+                status_message = "Network timeout while checking for updates. Displaying local packages only."
+            except Exception as e:
+                status_message = f"Could not fetch outdated packages: {e}"
+
+        return packages, outdated_info, status_message
 
     def get_package_size(self, package_name):
         try:
@@ -212,10 +236,17 @@ class PipManagerWindow(Gtk.ApplicationWindow):
         
         def worker():
             try:
-                packages, outdated_info = self.pip_service.get_packages()
+                # The service now returns a status message
+                packages, outdated_info, status_message = self.pip_service.get_packages()
+                
+                # If there was a message (e.g., "offline"), log it to the UI
+                if status_message:
+                    GLib.idle_add(self.log_output, status_message)
+                
                 GLib.idle_add(self.update_package_list_store, packages, outdated_info)
-            except Exception as e:          # keep broad catch for other errors
-                GLib.idle_add(self.log_output, f"Error loading packages. Are you connected to the internet?\nDetails: {e}")
+
+            except Exception as e:
+                GLib.idle_add(self.log_output, f"Error loading packages.\nDetails: {e}")
             finally:
                 GLib.idle_add(self.set_ui_busy, False)
 
