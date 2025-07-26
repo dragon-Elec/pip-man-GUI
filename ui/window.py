@@ -28,6 +28,7 @@ class PipManagerWindow(Gtk.ApplicationWindow):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.scroll_position = 0
 
         # The ListStore holds the master list of all package names
         self.list_store = Gio.ListStore(item_type=Gtk.StringObject)
@@ -66,53 +67,39 @@ class PipManagerWindow(Gtk.ApplicationWindow):
 
     # --- UI Setup ---
     def setup_column_view(self):
-        """Configures the Gtk.ColumnView to display package data."""
-        # Create the SortListModel that wraps the FilterListModel
-        self.sort_model = Gtk.SortListModel(model=self.filter_model)
-        
-        # Create sorters for each column
-        self.name_sorter = Gtk.StringSorter.new()
+        # 1.  Build the columns exactly as before …
+        # -------------------------------------------
+        # --- FIX: Use a custom sorter for clarity ---
+        self.name_sorter    = Gtk.CustomSorter.new(self._name_sort_func)
         self.version_sorter = Gtk.CustomSorter.new(self._version_sort_func)
-        self.size_sorter = Gtk.CustomSorter.new(self._size_sort_func)
+        self.size_sorter    = Gtk.CustomSorter.new(self._size_sort_func)
 
-        # Create a MultiSorter and set it as the primary sorter for the SortListModel
-        self.multi_sorter = Gtk.MultiSorter.new()
-        self.multi_sorter.append(self.name_sorter) # Default sort by name
-        self.sort_model.set_sorter(self.multi_sorter)
+        self.column_view.append_column(
+            self._create_column("Package Name", self._bind_name, self.name_sorter))
+        self.column_view.append_column(
+            self._create_column("Version",      self._bind_version, self.version_sorter))
+        self.column_view.append_column(
+            self._create_column("Size",         self._bind_size,    self.size_sorter))
 
-        # Set the ColumnView's model to a SingleSelection wrapping the SortListModel
+        # 2.  **Get the special sorter from the view and give it to the sort model**
+        # -------------------------------------------------------------------------
+        view_sorter = self.column_view.get_sorter()          # <-- key line
+        view_sorter.connect("changed", self.on_sorter_changed) # <-- FIX
+        self.sort_model = Gtk.SortListModel(model=self.filter_model,
+                                            sorter=view_sorter)
+
+        # 3.  Wrap selection and finish as before
+        # ---------------------------------------
         self.selection_model = Gtk.SingleSelection(model=self.sort_model)
         self.selection_model.connect("selection-changed", self.on_selection_changed)
         self.column_view.set_model(self.selection_model)
 
-        # Define columns using a helper to reduce repeated code
-        self.column_view.append_column(self._create_column("Package Name", self._bind_name, self.name_sorter))
-        self.column_view.append_column(self._create_column("Version", self._bind_version, self.version_sorter))
-        self.column_view.append_column(self._create_column("Size", self._bind_size, self.size_sorter))
-
-        # Connect to the column-view's sort signals to update the MultiSorter
-        self.column_view.connect("notify::sort-column-id", self._on_column_sort_changed)
-        self.column_view.connect("notify::sort-order", self._on_column_sort_changed)
-
-    def _on_column_sort_changed(self, column_view, pspec):
-        sort_column_id = column_view.get_sort_column_id()
-        sort_order = column_view.get_sort_order()
-
-        # Get the sorter associated with the clicked column
-        active_sorter = None
-        if sort_column_id == 0: # Package Name column
-            active_sorter = self.name_sorter
-        elif sort_column_id == 1: # Version column
-            active_sorter = self.version_sorter
-        elif sort_column_id == 2: # Size column
-            active_sorter = self.size_sorter
-        
-        if active_sorter:
-            # Clear existing sorters and add the new active sorter with the correct order
-            self.multi_sorter.remove_all()
-            self.multi_sorter.append(active_sorter)
-            active_sorter.set_sort_order(sort_order)
-            # The SortListModel will automatically re-sort when its sorter changes
+        # 4.  (Optional) choose an initial order
+        # --------------------------------------
+        columns = self.column_view.get_columns()
+        if columns and columns.get_n_items() > 0:
+            self.column_view.sort_by_column(columns.get_item(0),
+                                            Gtk.SortType.ASCENDING)
 
     def _create_column(self, title: str, bind_callback, sorter: Gtk.Sorter):
         """Helper to create a ColumnViewColumn with a label factory and a sorter."""
@@ -160,18 +147,29 @@ class PipManagerWindow(Gtk.ApplicationWindow):
         self.list_store.remove_all()
         for name in package_names:
             self.list_store.append(Gtk.StringObject.new(name))
-        # Re-apply the current sort order after updating the list
-        self.sort_model.set_sorter(self.multi_sorter) # This forces a re-sort
+        # The SortListModel will re-sort automatically.
         self._update_button_sensitivity()
 
     def update_package_view(self, pkg_name: str):
         """Tells the list view to redraw a specific row."""
+        # --- FIX: Preserve scroll position and selection ---
+        selected_item = self.selection_model.get_selected_item()
+        selected_pkg_name = None
+        if selected_item:
+            selected_pkg_name = selected_item.get_string()
+
         for i, item in enumerate(self.list_store):
             if item.get_string() == pkg_name:
-                # This informs the view that the data for this item has changed,
-                # triggering the 'bind' signals for its row.
                 self.list_store.items_changed(i, 1, 1)
                 break
+
+        if selected_pkg_name:
+            # Find the Gtk.StringObject for the previously selected package
+            for i, item in enumerate(self.sort_model): # Iterate through the *sorted* model
+                if item.get_string() == selected_pkg_name:
+                    # Reselect the item in the selection model
+                    self.selection_model.select_item(i, True)
+                    break
 
     def set_ui_busy(self, busy: bool):
         """Toggles the sensitivity of UI widgets."""
@@ -328,7 +326,7 @@ class PipManagerWindow(Gtk.ApplicationWindow):
         dialog.connect("response", lambda d, r: d.destroy())
         dialog.present()
 
-    def _version_sort_func(self, pkg1_str_obj, pkg2_str_obj):
+    def _version_sort_func(self, pkg1_str_obj, pkg2_str_obj, *args):
         pkg1 = self.logic.packages_data.get(pkg1_str_obj.get_string())
         pkg2 = self.logic.packages_data.get(pkg2_str_obj.get_string())
 
@@ -341,7 +339,7 @@ class PipManagerWindow(Gtk.ApplicationWindow):
         # Fallback to alphabetical sort if both are outdated or both are up-to-date
         return GLib.strcmp0(pkg1.name, pkg2.name)
 
-    def _size_sort_func(self, pkg1_str_obj, pkg2_str_obj):
+    def _size_sort_func(self, pkg1_str_obj, pkg2_str_obj, *args):
         pkg1 = self.logic.packages_data.get(pkg1_str_obj.get_string())
         pkg2 = self.logic.packages_data.get(pkg2_str_obj.get_string())
 
@@ -349,3 +347,37 @@ class PipManagerWindow(Gtk.ApplicationWindow):
 
         # Sort by size_bytes (numeric)
         return pkg1.size_bytes - pkg2.size_bytes
+
+    def _name_sort_func(self, pkg1_str_obj, pkg2_str_obj, *args):
+        pkg1 = self.logic.packages_data.get(pkg1_str_obj.get_string())
+        pkg2 = self.logic.packages_data.get(pkg2_str_obj.get_string())
+
+        if not pkg1 or not pkg2: return 0 # Should not happen
+
+        # A negative value if a < b, 0 if a = b, a positive value if a > b
+        return GLib.strcmp0(pkg1.name.lower(), pkg2.name.lower())
+
+    def on_sorter_changed(self, sorter, *args):
+        """Saves the scroll position and schedules it to be restored."""
+        scrolled_window = self.column_view.get_parent()
+        if not scrolled_window:
+            return
+
+        adjustment = scrolled_window.get_vadjustment()
+        self.scroll_position = adjustment.get_value()
+
+        # Schedule the restoration after a 10ms delay. This gives GTK time
+        # to finish its own UI updates after the sort.
+        GLib.timeout_add(10, self.restore_scroll_position)
+
+    def restore_scroll_position(self):
+        """Restores the scrollbar to its saved position."""
+        scrolled_window = self.column_view.get_parent()
+        if not scrolled_window:
+            return False # Stop the timeout
+
+        adjustment = scrolled_window.get_vadjustment()
+        adjustment.set_value(self.scroll_position)
+        
+        # Return False to ensure this function only runs once per timeout.
+        return False
