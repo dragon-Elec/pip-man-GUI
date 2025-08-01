@@ -168,31 +168,39 @@ class PipService:
 
     def get_package_details(self, package_name: str) -> dict | None:
         """
-        Runs `pip show` for a given package and parses the output into a dictionary.
-        Returns None if the command fails or the package is not found.
+        Uses importlib.metadata to get package details instantly.
+        This is much faster than shelling out to `pip show`.
+        Returns None if the package is not found.
+        
+        Note: The 'Required-by' field is not available through this method,
+        as fetching it would require iterating through ALL installed packages,
+        which is a major performance bottleneck. This trade-off is necessary
+        for instantaneous detail fetching.
         """
         try:
-            # The command we want to run
-            cmd = ['pip', 'show', package_name]
-            process = subprocess.run(
-                cmd, capture_output=True, text=True, check=True, encoding='utf-8'
-            )
+            # This core function returns an EmailMessage object that acts like a dict
+            metadata_obj = metadata.metadata(package_name)
             
-            details = {}
-            # The output is like "Key: Value", so we split each line
-            for line in process.stdout.strip().split('\n'):
-                if ': ' in line:
-                    key, value = line.split(': ', 1)
-                    # We store the key-value pair, cleaning up whitespace
-                    details[key] = value.strip()
-            
+            # Map the standard metadata keys (which are case-insensitive) to our desired keys
+            details = {
+                'Name': metadata_obj.get('Name'),
+                'Version': metadata_obj.get('Version'),
+                'Summary': metadata_obj.get('Summary'),
+                'Home-page': metadata_obj.get('Home-page'),
+                'Author': metadata_obj.get('Author-email') or metadata_obj.get('Author'), # Prefer email if available
+                'License': metadata_obj.get('License'),
+                # 'Requires-Dist' lists dependencies. Join them for clean display.
+                # This is the 'Requires' (dependencies OF this package) field.
+                'Requires': ', '.join(metadata_obj.get_all('Requires-Dist') or [])
+            }
             return details
             
-        except subprocess.CalledProcessError:
-            # This happens if `pip show` returns a non-zero exit code (e.g., package not found)
+        except metadata.PackageNotFoundError:
+            # This is the expected error if the package doesn't exist.
             return None
-        except Exception:
-            # Catch any other unexpected errors
+        except Exception as e:
+            # Catch any other unexpected errors during metadata parsing.
+            print(f"Error fetching metadata for {package_name}: {e}")
             return None
 
     def check_dependencies(self):

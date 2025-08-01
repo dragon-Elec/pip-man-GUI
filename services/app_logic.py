@@ -75,25 +75,7 @@ class AppLogic:
         
         self._ui_set_total_size_label(display_text)
 
-    # <<< FIX #1: Added a helper to parse the cached size string into bytes.
-    def _parse_size_str_to_bytes(self, size_str: str) -> int:
-        """Parses a size string like '10.5 MB' into bytes."""
-        if not size_str or "..." in size_str or "Error" in size_str:
-            return 0
-        
-        multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
-        total_bytes = 0
-        try:
-            value_str = "".join(filter(lambda c: c.isdigit() or c == '.', size_str))
-            unit_str = "".join(filter(str.isalpha, size_str)).upper()
-            if value_str and unit_str in multipliers:
-                value = float(value_str)
-                total_bytes = value * multipliers[unit_str]
-        except (ValueError, IndexError):
-            self._ui_log(f"Warning: Could not parse size string '{size_str}'.")
-            return 0
-            
-        return int(total_bytes)
+    
 
     # --- Public Methods (Called by the UI) ---
     def load_packages(self):
@@ -181,11 +163,14 @@ class AppLogic:
             # Start size calculation logic as before
             num_to_calculate = 0
             for name, pkg in self.packages_data.items():
-                if name in self.size_cache:
-                    pkg.size_str = self.size_cache[name]
-                    pkg.size_bytes = self._parse_size_str_to_bytes(pkg.size_str)
+                cached_data = self.size_cache.get(name)
+                if cached_data and 'size_bytes' in cached_data and 'size_str' in cached_data:
+                    # If valid cache entry exists, apply it directly
+                    pkg.size_bytes = cached_data['size_bytes']
+                    pkg.size_str = cached_data['size_str']
                     self._ui_update_package_view(name)
                 else:
+                    # Otherwise, mark for calculation
                     pkg.size_str = "..."
                     num_to_calculate += 1
                     self.calculate_size_for_package(name)
@@ -295,7 +280,7 @@ class AppLogic:
                 
                 self.packages_data[pkg_name].size_bytes = size_bytes
                 self.packages_data[pkg_name].size_str = size_str
-                self.size_cache[pkg_name] = size_str
+                self.size_cache[pkg_name] = {"size_bytes": size_bytes, "size_str": size_str}
                 save_size_cache(self.size_cache)
 
             self._ui_update_package_view(pkg_name)

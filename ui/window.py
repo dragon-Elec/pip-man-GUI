@@ -1,5 +1,3 @@
-# FILE: ui/window.py
-
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, GLib, Gio, Pango
@@ -13,7 +11,7 @@ class PipManagerWindow(Gtk.ApplicationWindow):
     __gtype_name__ = 'PipManagerWindow'
 
     # --- Template Children (UI Widgets) ---
-    details_button = Gtk.Template.Child() # ADD THIS
+    details_button = Gtk.Template.Child()
     search_entry = Gtk.Template.Child()
     package_entry = Gtk.Template.Child()
     install_button = Gtk.Template.Child()
@@ -47,8 +45,8 @@ class PipManagerWindow(Gtk.ApplicationWindow):
             'update_package_view': self.update_package_view,
             'set_total_size_label': self.total_size_label.set_text,
             'set_cache_button_tooltip': self.clear_cache_button.set_tooltip_text,
-            'show_details_dialog': self.show_details_dialog, # ADD THIS
-            'update_button_sensitivity': self._update_button_sensitivity, # <--- ADD THIS LINE
+            'show_details_dialog': self.show_details_dialog,
+            'update_button_sensitivity': self._update_button_sensitivity,
         }
         self.logic = AppLogic(callbacks=logic_callbacks)
         
@@ -83,8 +81,8 @@ class PipManagerWindow(Gtk.ApplicationWindow):
 
         # 2.  **Get the special sorter from the view and give it to the sort model**
         # -------------------------------------------------------------------------
-        view_sorter = self.column_view.get_sorter()          # <-- key line
-        view_sorter.connect("changed", self.on_sorter_changed) # <-- FIX
+        view_sorter = self.column_view.get_sorter()
+        view_sorter.connect("changed", self.on_sorter_changed)
         self.sort_model = Gtk.SortListModel(model=self.filter_model,
                                             sorter=view_sorter)
 
@@ -190,9 +188,9 @@ class PipManagerWindow(Gtk.ApplicationWindow):
 
         can_interact = (pkg is not None) and not is_busy
         
-        self.details_button.set_sensitive(can_interact) # ADD THIS
+        self.details_button.set_sensitive(can_interact)
         self.uninstall_button.set_sensitive(can_interact)
-        self.update_button.set_sensitive(can_interact and pkg.is_outdated)
+        self.update_button.set_sensitive(can_interact and pkg.is_outdated if pkg else False)
 
     # --- UI Event Handlers (from User to AppLogic) ---
     @Gtk.Template.Callback()
@@ -358,26 +356,35 @@ class PipManagerWindow(Gtk.ApplicationWindow):
         return GLib.strcmp0(pkg1.name.lower(), pkg2.name.lower())
 
     def on_sorter_changed(self, sorter, *args):
-        """Saves the scroll position and schedules it to be restored."""
+        """
+        When sorting changes, deselect any selected package to prevent
+        scrollbar jumping issues. This is called whenever a column header is clicked.
+        """
+        # 1. Deselect any currently selected package
+        self.selection_model.unselect_all()
+        
+        # 2. Save the current scroll position as a fallback
         scrolled_window = self.column_view.get_parent()
-        if not scrolled_window:
-            return
-
-        adjustment = scrolled_window.get_vadjustment()
-        self.scroll_position = adjustment.get_value()
-
-        # Schedule the restoration after a 10ms delay. This gives GTK time
-        # to finish its own UI updates after the sort.
-        GLib.timeout_add(10, self.restore_scroll_position)
+        if scrolled_window:
+            adjustment = scrolled_window.get_vadjustment()
+            self.scroll_position = adjustment.get_value()
+            
+            # Schedule scroll position restoration with bounds checking
+            GLib.timeout_add(50, self.restore_scroll_position)
+        
+        # 3. Update button sensitivity to reflect deselection
+        self._update_button_sensitivity()
 
     def restore_scroll_position(self):
-        """Restores the scrollbar to its saved position."""
+        """Restores the scrollbar to its saved position with bounds checking."""
         scrolled_window = self.column_view.get_parent()
         if not scrolled_window:
             return False # Stop the timeout
 
         adjustment = scrolled_window.get_vadjustment()
-        adjustment.set_value(self.scroll_position)
+        max_position = adjustment.get_upper() - adjustment.get_page_size()
+        valid_position = min(max_position, self.scroll_position)
+        valid_position = max(0, valid_position)  # Ensure it's not negative
+        adjustment.set_value(valid_position)
         
-        # Return False to ensure this function only runs once per timeout.
         return False
